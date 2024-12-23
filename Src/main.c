@@ -72,6 +72,18 @@ volatile uint32_t dump_ad4[DUMP_LENGTH];
 volatile uint32_t dump_ad5[DUMP_LENGTH];
 volatile uint32_t dump_ad6[DUMP_LENGTH];
 
+#define UART_RX_LINE_SIZE 256
+
+uint8_t uart_rx_line[UART_RX_LINE_SIZE];
+uint32_t uart_rx_counter = 0;
+uint8_t uart_rx_c;
+
+float duty_a = 0.0;
+float duty_b = 0.0;
+int ccr1 = 0;
+int ccr2 = 0;
+int ccr3 = 0;
+
 
 /* USER CODE END PV */
 
@@ -105,12 +117,12 @@ void __io_putchar(uint8_t ch)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
-	if(GPIO_Pin == ENC_Z_Pin)
-	{
-		uint16_t cnt = htim4.Instance->CNT;
-
-		printf("cnt = %6d \r\n", cnt);
-	}
+//	if(GPIO_Pin == ENC_Z_Pin)
+//	{
+//		uint16_t cnt = htim4.Instance->CNT;
+//
+//		printf("cnt = %6d \r\n", cnt);
+//	}
 
 	return;
 }
@@ -136,6 +148,91 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 	return;
 }
 
+
+int parse_cmd(char *str, float *cmd_a, float *cmd_b)
+{
+	return sscanf(str, "%f,%f", cmd_a, cmd_b);
+}
+
+
+void update_pwm(float cmd_a, float cmd_b)
+{
+	float max, min, offset;
+	max = (cmd_a > cmd_b ? (cmd_a > 0 ? cmd_a : 0) : (cmd_b > 0 ? cmd_b : 0));
+	min = (cmd_a < cmd_b ? (cmd_a < 0 ? cmd_a : 0) : (cmd_b < 0 ? cmd_b : 0));
+	printf("min=%f, max=%f\n", max, min);
+	offset = 0.5 - (max + min) / 2;
+	htim1.Instance->CCR1 = ccr1 = PWM_PERIOD_CYCLES / 2 * (cmd_a + offset);
+	htim1.Instance->CCR2 = ccr2 = PWM_PERIOD_CYCLES / 2 * offset;
+	htim1.Instance->CCR3 = ccr3 = PWM_PERIOD_CYCLES / 2 * (cmd_b + offset);
+
+}
+
+
+void set_cmd(float cmd_a, float cmd_b)
+{
+
+	const float upper_lim = 0.97;
+
+	// Limiter
+	float sum = 0.0;
+	if(cmd_a < -upper_lim)     { cmd_a = -upper_lim; }
+	else if(cmd_a > upper_lim) { cmd_a =  upper_lim; }
+	if(cmd_b < -upper_lim)     { cmd_b = -upper_lim; }
+	else if(cmd_b > upper_lim) { cmd_b =  upper_lim; }
+
+	sum = cmd_a + cmd_b;
+	if(cmd_b - cmd_a > upper_lim)
+	{
+		duty_a = (sum - upper_lim) * 0.5;
+		duty_b = (sum + upper_lim) * 0.5;
+	}
+	else if(cmd_a - cmd_b > upper_lim)
+	{
+		duty_a = (sum + upper_lim) * 0.5;
+		duty_b = (sum - upper_lim) * 0.5;
+	}
+	else
+	{
+		duty_a = cmd_a;
+		duty_b = cmd_b;
+	}
+
+	// Update pwm
+	update_pwm(duty_a, duty_b);
+
+}
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+
+	if(huart->Instance == huart2.Instance)
+	{
+		if(uart_rx_c == '\n')
+		{
+			float cmd_a, cmd_b;
+			int res;
+			uart_rx_line[uart_rx_counter] = '\0';
+			uart_rx_counter = 0;
+			res = parse_cmd((char*)uart_rx_line, &cmd_a, &cmd_b);
+			if(res == 2)
+			{
+				set_cmd(cmd_a, cmd_b);
+//				duty_a = cmd_a;
+//				duty_b = cmd_b;
+			}
+		}
+		else
+		{
+			uart_rx_line[uart_rx_counter] = uart_rx_c;
+			uart_rx_counter += 1;
+		}
+
+		HAL_UART_Receive_IT(&huart2, &uart_rx_c, 1);
+	}
+
+}
 
 
 /* USER CODE END 0 */
@@ -205,6 +302,8 @@ int main(void)
 	HAL_TIMEx_PWMN_Start_IT(&htim1, TIM_CHANNEL_3);
 
 
+	HAL_UART_Receive_IT(&huart2, &uart_rx_c, 1);
+
 
 //	HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
 
@@ -215,37 +314,37 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
 
-//	HAL_Delay(500);
-//	printf("Hello \r\n");
-//
-//
-//	printf("hf_counter = %ld\n", hf_counter);
-//
-//
-//	HAL_Delay(1000);
-//
-//
-//	printf("hf_counter = %ld\n", hf_counter);
 
-
-	while(hf_counter < (DUMP_LENGTH << 0))
-	{
-		HAL_Delay(100);
-	}
-
-	for(int i = 0; i < DUMP_LENGTH; i++)
-	{
-		printf("%d, %ld, %ld, %ld, %ld, %ld, %ld\r\n", i, dump_ad1[i], dump_ad2[i], dump_ad3[i], dump_ad4[i], dump_ad5[i], dump_ad6[i]);
-		HAL_Delay(1);
-	}
+//	while(hf_counter < (DUMP_LENGTH << 0))
+//	{
+//		HAL_Delay(100);
+//	}
+//
+//	for(int i = 0; i < DUMP_LENGTH; i++)
+//	{
+//		printf("%d, %ld, %ld, %ld, %ld, %ld, %ld\r\n", i, dump_ad1[i], dump_ad2[i], dump_ad3[i], dump_ad4[i], dump_ad5[i], dump_ad6[i]);
+//		HAL_Delay(1);
+//	}
 
 
   while (1)
   {
 
-		HAL_Delay(100);
+		HAL_Delay(200);
 
 //		HAL_UART_Transmit(&huart2, "ABCDEFG\n", 8, 1);
+
+
+//		for(int i = 0; i < 40; i++)
+//		{
+//			printf("%c", uart_rx_line[i]);
+//		}
+//		printf(", cnt = %d\n", uart_rx_counter);
+
+
+//		printf("cmd = %f, %f\n", duty_a, duty_b);
+		printf("ccr = %5d, %5d, %5d\n", ccr1, ccr2, ccr3);
+
 
 
 //		uint16_t cnt = htim4.Instance->CNT;
